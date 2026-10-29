@@ -1,45 +1,83 @@
 import os
-import logging
-from flask import Flask, render_template, redirect, url_for, flash
-from forms import ContactForm
-from products.routes import products_bp
+import unittest
+from app import app
+from tinydb import TinyDB
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'super-secret-key-change-in-production'
+class ProductsTestCase(unittest.TestCase):
+    def setUp(self):
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+        self.client = app.test_client()
 
-# Створення директорії для логів
-os.makedirs('logs', exist_ok=True)
+        # Створення директорії data, якщо вона відсутня
+        os.makedirs('data', exist_ok=True)
 
-# Налаштування логування контактної форми
-logger = logging.getLogger('contact_logger')
-logger.setLevel(logging.INFO)
-file_handler = logging.FileHandler('logs/contact.log', encoding='utf-8')
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-if not logger.handlers:
-    logger.addHandler(file_handler)
+        # Використовуємо тимчасовий JSON для тестів
+        self.test_db_path = 'data/test_products.json'
+        if os.path.exists(self.test_db_path):
+            os.remove(self.test_db_path)
+        
+        # Перенаправлення шляху базі у фоновому режимі
+        import products.routes
+        products.routes.get_db = lambda: TinyDB(self.test_db_path)
 
-# Реєстрація блюпринта продуктів
-app.register_blueprint(products_bp)
+    def tearDown(self):
+        if os.path.exists(self.test_db_path):
+            os.remove(self.test_db_path)
 
-@app.route('/contact', methods=['GET', 'POST'])
-def contact():
-    form = ContactForm()
-    if form.validate_on_submit():
-        try:
-            log_entry = (
-                f"Name: {form.name.data} | Email: {form.email.data} | "
-                f"Phone: {form.phone.data} | Subject: {form.subject.data} | "
-                f"Message: {form.message.data}"
-            )
-            logger.info(log_entry)
-            flash("Дякуємо! Ваше повідомлення успішно надіслано та збережено.", "success")
-            return redirect(url_for('contact'))
-        except Exception as e:
-            logger.error(f"Помилка під час запису форми: {e}")
-            flash("Виникла помилка під час обробки вашого запиту.", "danger")
-            return redirect(url_for('contact'))
+    def test_create_and_read_product(self):
+        """Тест додавання та перегляду товару"""
+        response = self.client.post('/product/add', data={
+            'name': 'Тестовий телефон',
+            'content': 'Детальний опис тестового смартфона',
+            'price': '19999.99',
+            'category': 'electronics',
+            'quantity': 5
+        }, follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Тестовий телефон'.encode('utf-8'), response.data)
 
-    return render_template('contact.html', form=form)
+        # Перевірка детальної сторінки
+        response_detail = self.client.get('/product/1')
+        self.assertEqual(response_detail.status_code, 200)
+        self.assertIn('Детальний опис тестового смартфона'.encode('utf-8'), response_detail.data)
+
+    def test_update_product(self):
+        """Тест редагування товару"""
+        self.client.post('/product/add', data={
+            'name': 'Стара назва',
+            'content': 'Старий опис товару',
+            'price': '100.00',
+            'category': 'books',
+            'quantity': 2
+        })
+
+        response = self.client.post('/product/1/edit', data={
+            'name': 'Нова назва',
+            'content': 'Оновлений опис товару',
+            'price': '150.00',
+            'category': 'books',
+            'quantity': 10
+        }, follow_redirects=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Нова назва'.encode('utf-8'), response.data)
+
+    def test_delete_product(self):
+        """Тест видалення товару"""
+        self.client.post('/product/add', data={
+            'name': 'Товар для видалення',
+            'content': 'Короткий опис',
+            'price': '50.00',
+            'category': 'home',
+            'quantity': 1
+        })
+
+        response = self.client.post('/product/1/delete', follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+
+        response_not_found = self.client.get('/product/1')
+        self.assertEqual(response_not_found.status_code, 404)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    unittest.main()
